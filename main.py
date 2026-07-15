@@ -11,7 +11,10 @@ so it stays light on a VM.
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header, Request, Depends
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
@@ -19,13 +22,45 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
+# Load variables from a .env file (if one exists) into the environment.
 load_dotenv()
 
+# Set up logging (reads LOG_LEVEL / LOG_RETENTION_DAYS / LOG_DIR from env).
 from logging_config import setup_logging
 
 logger = setup_logging()
 
+# How many requests are allowed in a time window, e.g. "20/minute", "5/second".
+# Configurable from the .env file.
+RATE_LIMIT = os.getenv("RATE_LIMIT", "20/minute")
+
 app = FastAPI(title="YouTube Transcript API")
+
+# Rate limiter: limits are counted per client IP address.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+logger.info("Rate limit set to %s per client IP", RATE_LIMIT)
+
+
+def require_api_key(x_api_key: str = Header(None)):
+    """
+    Reject any request that does not send the correct secret key.
+
+    The secret lives in the .env file as API_KEY. The caller (n8n) must send
+    the exact same value in the 'X-API-Key' request header.
+    """
+    expected = os.getenv("API_KEY")
+
+    # Fail closed: if no key is configured on the server, block everything.
+    if not expected:
+        logger.critical("API_KEY is not set in the environment - rejecting all requests")
+        raise HTTPException(status_code=503, detail="Server not configured: API_KEY is missing.")
+
+    if not x_api_key or x_api_key != expected:
+        logger.warning("Rejected request: missing or invalid API key")
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
 def build_client() -> YouTubeTranscriptApi:
@@ -66,8 +101,10 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/transcript/{video_id}")
+@app.get("/transcript/{video_id}", dependencies=[Depends(require_api_key)])
+@limiter.limit(RATE_LIMIT)
 def get_transcript(
+    request: Request,
     video_id: str,
     lang: str = Query(
         "en",

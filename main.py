@@ -19,7 +19,6 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
-# Load variables from a .env file (if one exists) into the environment.
 load_dotenv()
 
 # Set up logging (reads LOG_LEVEL / LOG_RETENTION_DAYS / LOG_DIR from env).

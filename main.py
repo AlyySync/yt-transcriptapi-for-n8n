@@ -21,7 +21,6 @@ from youtube_transcript_api._errors import (
 
 load_dotenv()
 
-# Set up logging (reads LOG_LEVEL / LOG_RETENTION_DAYS / LOG_DIR from env).
 from logging_config import setup_logging
 
 logger = setup_logging()

@@ -1,5 +1,5 @@
 """
-YouTube Transcript API service.
+YouTube Transcript and Description API service.
 
 Give it a video ID -> returns the transcript as JSON.
 Designed to be called from n8n's HTTP Request node.
@@ -9,6 +9,9 @@ so it stays light on a VM.
 """
 
 import os
+import re
+
+from yt_dlp import YoutubeDL
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Header, Request, Depends
@@ -34,7 +37,7 @@ logger = setup_logging()
 # Configurable from the .env file.
 RATE_LIMIT = os.getenv("RATE_LIMIT", "20/minute")
 
-app = FastAPI(title="YouTube Transcript API")
+app = FastAPI(title="YouTube Transcript and Description API")
 
 # Rate limiter: limits are counted per client IP address.
 limiter = Limiter(key_func=get_remote_address)
@@ -42,25 +45,6 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 logger.info("Rate limit set to %s per client IP", RATE_LIMIT)
-
-
-def require_api_key(x_api_key: str = Header(None)):
-    """
-    Reject any request that does not send the correct secret key.
-
-    The secret lives in the .env file as API_KEY. The caller (n8n) must send
-    the exact same value in the 'X-API-Key' request header.
-    """
-    expected = os.getenv("API_KEY")
-
-    # Fail closed: if no key is configured on the server, block everything.
-    if not expected:
-        logger.critical("API_KEY is not set in the environment - rejecting all requests")
-        raise HTTPException(status_code=503, detail="Server not configured: API_KEY is missing.")
-
-    if not x_api_key or x_api_key != expected:
-        logger.warning("Rejected request: missing or invalid API key")
-        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
 def build_client() -> YouTubeTranscriptApi:
@@ -101,7 +85,48 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/transcript/{video_id}", dependencies=[Depends(require_api_key)])
+@app.get("/description/{video_id}")
+@limiter.limit(RATE_LIMIT)
+def get_description(request: Request, video_id: str):
+    """Fetch the full video description without an API key or media download."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+
+    logger.info("Description requested | video_id=%s", video_id)
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "ignore_no_formats_error": True,
+        "cachedir": False,
+        "socket_timeout": 30,
+    }
+    proxy_ip = os.getenv("PROXY_IP")
+    proxy_port = os.getenv("PROXY_PORT")
+    proxy_user = os.getenv("PROXY_USER")
+    proxy_pass = os.getenv("PROXY_PASS")
+    if proxy_ip and proxy_port and proxy_user and proxy_pass:
+        options["proxy"] = f"http://{proxy_user}:{proxy_pass}@{proxy_ip}:{proxy_port}"
+
+    try:
+        with YoutubeDL(options) as client:
+            info = client.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}",
+                download=False,
+            )
+        if info is None:
+            raise ValueError("No video metadata returned.")
+        description = info.get("description") or ""
+    except Exception:
+        logger.exception("Failed to fetch description | video_id=%s", video_id)
+        raise HTTPException(status_code=502, detail="Failed to fetch video description.")
+
+    logger.info("Description OK | video_id=%s | characters=%d", video_id, len(description))
+    return {"video_id": video_id, "description": description}
+
+
+@app.get("/transcript/{video_id}")
 @limiter.limit(RATE_LIMIT)
 def get_transcript(
     request: Request,

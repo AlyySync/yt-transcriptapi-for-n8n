@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
 youtube-transcript-api>=1.2.0
+yt-dlp
 python-dotenv
 slowapi
